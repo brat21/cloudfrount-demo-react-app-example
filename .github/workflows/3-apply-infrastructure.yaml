@@ -1,0 +1,109 @@
+name: "Apply Infrastructure, build and deploy App to CloudFront"
+on:
+  workflow_dispatch:
+
+jobs:
+  apply-infrastructure:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform
+      
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_wrapper: false
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.REGION }}
+
+    - name: Set Variables
+      id: set-variables
+      run: |
+        echo "BUCKET_NAME=${{ vars.BUCKET_NAME }}" >> $GITHUB_ENV
+        echo "STATE_BUCKET_NAME=${{ vars.BUCKET_NAME }}-tfstate" >> $GITHUB_ENV
+        echo "STATE_BUCKET_KEY=${{ vars.BUCKET_NAME }}.tfstate" >> $GITHUB_ENV
+        echo "DYNAMO_TABLE=${{ vars.BUCKET_NAME }}"-tf-lock-table>> $GITHUB_ENV
+
+    - name: Terraform Init
+      id: init
+      run: | 
+        terraform init -migrate-state \
+        -backend-config="bucket=$STATE_BUCKET_NAME" \
+        -backend-config="region=$REGION" \
+        -backend-config="key=$STATE_BUCKET_KEY" \
+        -backend-config="dynamodb_table=$DYNAMO_TABLE"
+
+    - name: Terraform fmt
+      id: fmt
+      run: terraform fmt -check
+
+    - name: Terraform Apply
+      id: apply
+      if: github.ref == 'refs/heads/main'
+      run: terraform apply -auto-approve -input=false -var bucket_name=$BUCKET_NAME
+
+    - name: Call terraform output
+      id: output
+      run: |
+        echo "::set-output name=s3_bucket_name::$(terraform output s3_bucket_name)"
+        echo "::set-output name=cf_endpoit::$(terraform output website_endpoint)"
+        echo "::set-output name=cf_cdn_id::$(terraform output website_cdn_id)"
+
+    outputs: 
+      s3_bucket_name: ${{ steps.output.outputs.s3_bucket_name }}
+      cf_endpoit: ${{ steps.output.outputs.cf_endpoit }}
+      cf_cdn_id: ${{ steps.output.outputs.cf_cdn_id }}
+
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    needs: apply-infrastructure
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    env:
+      BUCKET: ${{ needs.apply-infrastructure.outputs.s3_bucket_name }}
+      DIST: build
+      DIST_ID: ${{ needs.apply-infrastructure.outputs.cf_cdn_id }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.REGION }}
+
+    - name: Install Dependencies
+      run: |
+        node --version
+        npm audit fix --force --audit-level=critical
+
+    - name: Build Static Website
+      run: npm run build
+      env:
+        CI: false
+
+    - name: Copy files to the production website with the AWS CLI
+      run: |
+        aws s3 sync --delete ${{ env.DIST }} s3://${{ env.BUCKET }}
+
+    - name: Invalidade Cloudfront cache with the AWS CLI
+      run: |
+        aws cloudfront create-invalidation \
+          --distribution-id ${{ env.DIST_ID }} \
+          --paths "/*"

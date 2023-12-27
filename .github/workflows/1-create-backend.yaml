@@ -1,0 +1,56 @@
+name: "S3 state infrastructure creation"
+on:
+  workflow_dispatch:
+
+jobs:
+  Plan-s3-backend-bucket:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform/backend
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.REGION }}
+
+    - name: Set Variables
+      id: set-variables
+      run: |
+        echo "BUCKET_NAME=${{ vars.BUCKET_NAME }}" >> $GITHUB_ENV
+
+    - name: Test Variables
+      id: test-variables
+      run: |
+        echo $BUCKET_NAME
+
+    - name: Terraform Init
+      id: init
+      working-directory: ./terraform/backend
+      run: terraform init
+
+    - name: Terraform fmt
+      id: fmt
+      working-directory: ./terraform/backend
+      run: terraform fmt -check
+
+    - name: Terraform Plan
+      id: plan
+      working-directory: ./terraform/backend
+      run: terraform plan -refresh=true -var bucket_name=$BUCKET_NAME
+
+    - name: Terraform Apply
+      id: apply
+      if: github.ref == 'refs/heads/main'
+      working-directory: ./terraform/backend
+      run: terraform apply -auto-approve -input=false -var bucket_name=$BUCKET_NAME        

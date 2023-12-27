@@ -1,0 +1,59 @@
+name: "Plan Infrastructure creation"
+on:
+  workflow_dispatch:
+
+jobs:
+  plan-infrastructure:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.REGION }}
+
+    - name: Set Variables
+      id: set-variables
+      run: |
+        echo "BUCKET_NAME=${{ vars.BUCKET_NAME }}" >> $GITHUB_ENV
+        echo "STATE_BUCKET_NAME=${{ vars.BUCKET_NAME }}-tfstate" >> $GITHUB_ENV
+        echo "STATE_BUCKET_KEY=${{ vars.BUCKET_NAME }}.tfstate" >> $GITHUB_ENV
+        echo "DYNAMO_TABLE=${{ vars.BUCKET_NAME }}"-tf-lock-table>> $GITHUB_ENV
+
+    - name: Test Variables
+      id: test-variables
+      run: |
+        echo $BUCKET_NAME
+        echo $STATE_BUCKET_NAME
+        echo $STATE_BUCKET_KEY
+        echo $DYNAMO_TABLE
+
+    - name: Terraform Init
+      id: init
+      run: | 
+        terraform init -migrate-state \
+        -backend-config="bucket=$STATE_BUCKET_NAME" \
+        -backend-config="region=$REGION" \
+        -backend-config="key=$STATE_BUCKET_KEY" \
+        -backend-config="dynamodb_table=$DYNAMO_TABLE"
+
+    - name: Terraform fmt
+      id: fmt
+      run: terraform fmt -check
+
+    - name: Terraform Plan
+      id: plan
+      shell: bash
+      run: terraform plan -refresh=true  -var bucket_name=$BUCKET_NAME
